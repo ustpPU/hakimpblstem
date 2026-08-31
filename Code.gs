@@ -6,9 +6,7 @@ const CONFIG = {
     'SEKOLAH RENDAH': ['Dr. Mohd Arif bin Mohd Sarjidan', 'Dr. Nashrah Hani Jamadon'],
     'SEKOLAH MENENGAH': ['Dr. Mohd Arif bin Mohd Sarjidan', 'Dr. Nashrah Hani Jamadon']
   },
-  // Tukar hanya selepas kaedah ranking rasmi dimuktamadkan.
-  awardThresholds: { PLATINUM: 90, EMAS: 80, PERAK: 70, GANGSA: 0 },
-  publishWinners: false
+  publishWinners: true
 };
 const RUBRIC = [
   ['A','keaslian','Keaslian','Idea asli dengan kelainan jelas.',5], ['A','kreativiti','Kreativiti','Reka bentuk atau penyelesaian di luar kebiasaan.',5], ['A','integrasi_stem','Integrasi STEM','Elemen Sains, Teknologi, Kejuruteraan dan Matematik jelas.',5], ['A','mesra_pengguna','Mesra Pengguna','Praktikal, selamat dan sesuai untuk pengguna.',5], ['A','kekemasan_produk','Kekemasan Produk','Kemas, tersusun, berfungsi dan menarik.',5], ['A','sumber_rujukan','Sumber & Rujukan','Sumber relevan, sahih dan dinyatakan dengan baik.',5],
@@ -30,5 +28,35 @@ function scores_(){ const sh=scoreSheet_(), vals=sh.getDataRange().getDisplayVal
 function bootstrap_(){ return {success:true,competition:'Borang Hakim PBL STEM',judges:CONFIG.judges,rubric:RUBRIC,participants:participants_(),scores:scores_().map(x=>({bil:x.bil,kategori:x.kategori,hakim:x.hakim,total:x.total})),categories:Object.keys(CONFIG.judges)}; }
 function validate_(p, person){ const category=normal_(p.category), judge=String(p.judge||'').trim(); if(!CONFIG.judges[category]||CONFIG.judges[category].indexOf(judge)<0)throw Error('Hakim atau kategori tidak sah.'); if(!person||person.kategori!==category)throw Error('Peserta tidak ditemui dalam kategori hakim.'); const got=p.scores||{}, clean={}, sections={A:0,B:0,C:0,D:0}; RUBRIC.forEach(x=>{const n=got[x.key];if(!Number.isInteger(n)||n<0||n>x.max)throw Error('Markah tidak sah.');clean[x.key]=n;sections[x.section]+=n;});return {category,judge,clean,sections,total:sections.A+sections.B+sections.C+sections.D}; }
 function save_(p){ const lock=LockService.getScriptLock(); if(!lock.tryLock(30000)) return {success:false,message:'Sistem sedang menyimpan rekod lain. Sila cuba semula.'}; try { const requestedCategory=normal_(p.category), people=participants_(), person=people.find(x=>String(x.bil)===String(p.participantBil)&&x.kategori===requestedCategory); const v=validate_(p,person), sh=scoreSheet_(); const existing=scores_().some(x=>String(x.bil)===String(person.bil)&&x.kategori===v.category&&x.hakim===v.judge); if(existing)return {success:false,code:'DUPLICATE',message:'Markah kumpulan ini telah direkodkan oleh hakim ini.'}; const row=[new Date(),Utilities.getUuid(),person.bil,person.namaPeserta,person.sekolah,v.category,person.bidang,person.tajuk,v.judge].concat(RUBRIC.map(x=>v.clean[x.key]),[v.sections.A,v.sections.B,v.sections.C,v.sections.D,v.total,String(p.comment||'').slice(0,2000)]); sh.appendRow(row); return {success:true,message:'Markah berjaya disimpan.',recordId:row[1],total:v.total}; } catch(e){return {success:false,message:e.message||'Markah tidak dapat disimpan.'};} finally {lock.releaseLock();} }
-function award_(n){const t=CONFIG.awardThresholds;return n>=t.PLATINUM?'PLATINUM':n>=t.EMAS?'EMAS':n>=t.PERAK?'PERAK':'GANGSA';}
-function winners_(){ if(!CONFIG.publishWinners)return {success:true,published:false,message:'Keputusan belum diterbitkan.',categories:Object.keys(CONFIG.judges),winners:{}}; const ps=participants_(), ss=scores_(), out={}; Object.keys(CONFIG.judges).forEach(cat=>{out[cat]=ps.filter(p=>p.kategori===cat).map(p=>{const r=ss.filter(s=>s.kategori===cat&&String(s.bil)===String(p.bil));const totals=r.map(x=>x.total);const complete=r.length===CONFIG.judges[cat].length;const total=totals.reduce((a,b)=>a+b,0);const a=r.reduce((n,x)=>n+x.sections.A,0),b=r.reduce((n,x)=>n+x.sections.B,0),c=r.reduce((n,x)=>n+x.sections.C,0),d=r.reduce((n,x)=>n+x.sections.D,0);return {bil:p.bil,tajuk:p.tajuk,namaPeserta:p.namaPeserta,sekolah:p.sekolah,total,complete,tie:[a,b,c,d],award:award_(total/Math.max(1,CONFIG.judges[cat].length))};}).filter(x=>x.complete).sort((x,y)=>y.total-x.total||y.tie[0]-x.tie[0]||y.tie[1]-x.tie[1]||y.tie[2]-x.tie[2]||y.tie[3]-x.tie[3]||String(x.bil).localeCompare(String(y.bil))).map((x,i)=>Object.assign(x,{kedudukan:i+1}));});return {success:true,published:true,categories:Object.keys(CONFIG.judges),winners:out}; }
+const AWARDS = [
+  {key:'PEMBELAJARAN_BESTARI', label:'Anugerah Pembelajaran Bestari', capacity:3, metric:'total'},
+  {key:'PEMBENTANGAN_MISALI', label:'Anugerah Pembentangan Misali', capacity:3, metric:'C'},
+  {key:'IDEA_INOVATIF', label:'Anugerah Idea Inovatif', capacity:2, metric:'A'},
+  {key:'PEMBELAJARAN_BERIMPAK', label:'Anugerah Pembelajaran Berimpak', capacity:2, metric:'B'}
+];
+function metric_(row, award){ return award.metric==='total'?row.total:(row.sectionAverage[award.metric]/30*100); }
+function compareForAward_(award){ return (x,y)=>metric_(y,award)-metric_(x,award)||y.total-x.total||y.sectionAverage.A-x.sectionAverage.A||y.sectionAverage.B-x.sectionAverage.B||y.sectionAverage.C-x.sectionAverage.C||y.sectionAverage.D-x.sectionAverage.D||String(x.bil).localeCompare(String(y.bil),undefined,{numeric:true}); }
+function allocateAwards_(rows){
+  if(!rows.length)return rows;
+  const ordered=rows.slice().sort((x,y)=>y.total-x.total||String(x.bil).localeCompare(String(y.bil),undefined,{numeric:true})), counts=AWARDS.map(()=>0), current=[], best={score:-Infinity,signature:'',assignment:null};
+  function walk(i,score){
+    if(i===ordered.length){const signature=current.join('');if(score>best.score+1e-9||(Math.abs(score-best.score)<1e-9&&(!best.signature||signature<best.signature))){best.score=score;best.signature=signature;best.assignment=current.slice();}return;}
+    AWARDS.forEach((award,a)=>{if(counts[a]>=award.capacity)return;counts[a]++;current[i]=a;walk(i+1,score+metric_(ordered[i],award));counts[a]--;});
+  }
+  walk(0,0);
+  ordered.forEach((row,i)=>{const award=AWARDS[best.assignment[i]];row.award=award.key;row.awardLabel=award.label;row.awardMetric=metric_(row,award);});
+  AWARDS.forEach(award=>ordered.filter(x=>x.award===award.key).sort(compareForAward_(award)).forEach((x,i)=>x.awardRank=i+1));
+  return ordered;
+}
+function winners_(){
+  if(!CONFIG.publishWinners)return {success:true,published:false,message:'Keputusan belum diterbitkan.',categories:Object.keys(CONFIG.judges),winners:{}};
+  const ps=participants_(), ss=scores_(), out={}, progress={};
+  Object.keys(CONFIG.judges).forEach(cat=>{
+    const categoryPeople=ps.filter(p=>p.kategori===cat), categoryScores=ss.filter(s=>s.kategori===cat), expected=categoryPeople.length*CONFIG.judges[cat].length;
+    let rows=categoryPeople.map(p=>{const records=categoryScores.filter(s=>String(s.bil)===String(p.bil)), judgeCount=records.length;if(!judgeCount)return null;const sum=k=>records.reduce((n,x)=>n+(k==='total'?x.total:x.sections[k]),0);const sectionAverage={A:sum('A')/judgeCount,B:sum('B')/judgeCount,C:sum('C')/judgeCount,D:sum('D')/judgeCount};return {bil:p.bil,tajuk:p.tajuk,namaPeserta:p.namaPeserta,sekolah:p.sekolah,total:sum('total')/judgeCount,sectionAverage,judgeCount,complete:judgeCount===CONFIG.judges[cat].length};}).filter(Boolean);
+    rows.sort((x,y)=>y.total-x.total||y.sectionAverage.A-x.sectionAverage.A||y.sectionAverage.B-x.sectionAverage.B||y.sectionAverage.C-x.sectionAverage.C||y.sectionAverage.D-x.sectionAverage.D||String(x.bil).localeCompare(String(y.bil),undefined,{numeric:true})).forEach((x,i)=>x.kedudukan=i+1);
+    out[cat]=allocateAwards_(rows);
+    progress[cat]={received:categoryScores.length,expected,evaluatedProjects:rows.length,totalProjects:categoryPeople.length,complete:categoryScores.length===expected};
+  });
+  return {success:true,published:true,provisional:Object.values(progress).some(x=>!x.complete),categories:Object.keys(CONFIG.judges),awards:AWARDS.map(x=>({key:x.key,label:x.label,capacity:x.capacity})),progress,winners:out};
+}
